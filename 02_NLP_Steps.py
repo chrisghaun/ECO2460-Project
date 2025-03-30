@@ -27,26 +27,49 @@ text_data = pd.read_csv("text_forNLP.csv")
 
 ########################Pre-Processing Steps for text
 
-
-
-
 # cleaning the strings. Authors get rid of anything that is not a letter
 # get rid of double spaces, appostrophes
 #everything lower case
 def clean_function(doc):
+    
     #dealing with accents: this will replace é with e instead of breaking up the word
     doc = unicodedata.normalize('NFKD', doc)
     doc = ''.join([c for c in doc if not unicodedata.combining(c)])
 
-    
     doc = doc.lower()
     doc = doc.replace("'", "")
     doc = re.sub(r'[^a-zA-Z]', ' ', doc)
     doc = re.sub(r'\s+', ' ', doc)
     return doc
-    
+
+
 #apply the function to the data
-text_data['cleaned_text_1'] = text_data['text_clean'].apply(clean_function)
+#text_data['cleaned_text_1'] = text_data['text_clean'].apply(clean_function)
+
+#lemmatizing: Takes about 10 minutes for small sample
+
+# Use POS tags to handle verbs and adjectives
+import swifter
+def get_wordnet_pos(nltk_tag):
+    tag_dict = {"J": wordnet.ADJ, "N": wordnet.NOUN, "V": wordnet.VERB, "R": wordnet.ADV}
+    return tag_dict.get(nltk_tag[0].upper(), wordnet.NOUN)
+
+lemma = WordNetLemmatizer()
+def lemmatize_text(text):
+    words = word_tokenize(text) 
+    pos_tags = pos_tag(words) 
+    return " ".join(lemma.lemmatize(word, get_wordnet_pos(tag)) for word, tag in pos_tags)
+
+text_data['cleaned_text_2'] = text_data['cleaned_text_1'].swifter.apply(lemmatize_text)
+text_data.drop(columns=['cleaned_text_1'], inplace=True)
+
+####
+#SAVE TO CSV
+
+text_data.to_csv('text_forNLP_lemmatized.csv', index=False)
+
+#re-import data with lemmatization. The data have been cleaned and lemmatized
+text_data = pd.read_csv('text_forNLP_lemmatized.csv')
 
 
 #define a set of stopwords and remove them from the data
@@ -66,39 +89,18 @@ stop3 = {'u', 'th', 'go', 'moreover', 'like', 'since', 'mine', 'mr', 'mrs', 'nd'
          'nice', 'want', 'yesterday', 'honourable', 'motion', 'madam', 'make',
          'day', 'floor', 'declare', 'think'}
 
-all_stopwords = stop1 | stop2 | stop3
+#extra words found in the LDA topics
+stop4 = {'thing', 'come', 'look', 'time', 'way', 'lot', 'really', 'year', 
+         'sure', 'place', 'happen', 'hear', 'try', 'ask', 'let', 'bring'}
 
-
-#lemmatizing: Takes about 10 minutes for small sample
-
-# Use POS tags to handle verbs and adjectives
-import swifter
-def get_wordnet_pos(nltk_tag):
-    tag_dict = {"J": wordnet.ADJ, "N": wordnet.NOUN, "V": wordnet.VERB, "R": wordnet.ADV}
-    return tag_dict.get(nltk_tag[0].upper(), wordnet.NOUN)
-
-lemma = WordNetLemmatizer()
-def lemmatize_text(text):
-    words = word_tokenize(text) 
-    pos_tags = pos_tag(words) 
-    return " ".join(lemma.lemmatize(word, get_wordnet_pos(tag)) for word, tag in pos_tags)
-
-text_data['cleaned_text_2'] = text_data['cleaned_text_1'].swifter.apply(lemmatize_text)
-
-text_data.drop(columns=['cleaned_text_1'], inplace=True)
-
+all_stopwords = stop1 | stop2 | stop3 | stop4
 
 text_data['cleaned_text_3'] = text_data['cleaned_text_2'].apply(
     lambda doc: [val for val in doc.split() if val not in all_stopwords]
 )
 text_data['cleaned_text_3'] = text_data['cleaned_text_3'].apply(" ".join)
 
-#text_data = text_data.drop(columns=['cleaned_text_2'])
-
-
-text_data_backup = text_data
-### For manual check of lemmatization. Make sure lemmatization did something
-#data_lemmatized_check = text_data[text_data['cleaned_text_3'] == text_data['cleaned_text_2']]
+#text_data_backup = text_data
 
 ##########################################
 # Sentiment Analysis: Harvard Vocabulary #
@@ -113,6 +115,7 @@ lexicon = pd.read_excel("inquirerbasic.xls")
 
 hostile_lexicon = lexicon['Entry'][lexicon["Hostile"].notna()]
 
+hostile_lexicon = hostile_lexicon.apply(lambda text: "" if isinstance(text, bool) else text)
 
 
 ##################################
@@ -138,12 +141,9 @@ text_data['original_length'] = text_data['text_clean'].apply(lambda text: len(te
 text_data['hostile_word_count'] = text_data['cleaned_text_3'].apply(lambda text: sum(1 for word in text.split() if word in hostile_lexicon))
 text_data["SENT_Hostile"] = text_data['hostile_word_count']/text_data['original_length']
 
-#Approach #2: At least one word in the utterance is hostile
-#text_data["SENT_Hostile2"] = (text_data['hostile_word_count'] > 0).astype(int)
-#text_data["utterance_counter"] = 1
-
-
-
+################################
+# Generate Descriptive Figures #
+################################
 
 ############
 # Aggregate Hostility by day: Take the average over all blocks
@@ -160,18 +160,90 @@ monthly_avg = avg_hostile_series.resample('M', on='date').mean().reset_index()
 avg_hostile_series.to_csv('Hostility_Series.csv', index=False)
 monthly_avg.to_csv('Hostility_Series_M.csv', index=False)
 
-#############
-# LDA Model #
-
-text_data_lda = text_data[(text_data['party'] != "none") | text_data['party'].notna()]
-
-
-#try collapsing by block for the LDA stuff. Was taking too long to run at the utterance level
+########
+# Filter for the LDA model
+#take out 
+text_data_lda = text_data[(text_data['party'] != "none") & text_data['party'].notna()]
 text_data_lda['cleaned_text_tokens'] = text_data_lda['cleaned_text_3'].apply(word_tokenize)
 
+#################################################
+# Tuning the Number of Topics for the LDA Model #
+#################################################
 
+from gensim.models import LdaMulticore
+from gensim.models import CoherenceModel
+np.random.seed(2460)
+
+#################
+# Looking for the optimal number of topics
+# Check both coherence of topics for each K value
+
+#split the data: Take 2k randomly from each year
+text_data_lda['date'] = pd.to_datetime(text_data_lda['date'])
+text_data_lda['year'] = text_data_lda['date'].dt.year
+text_data_testing = text_data_lda.groupby('year', group_keys=False).apply(lambda x: x.sample(n=2000, random_state=2460))
+
+#create the dictionary and corpus for the test set
+DTM_test = Dictionary(text_data_testing['cleaned_text_tokens'].tolist())
+DTM_test.filter_extremes(no_below=30, no_above=0.3)
+
+#for a manual check. Turn into a data frame
+#use this to get rid of some more stopwords
+DTM_df_test = pd.DataFrame(list(DTM_test.token2id.items()), columns=['token', 'id'])
+DTM_df_test = DTM_df_test.sort_values(by="token").reset_index(drop=True)
+
+corpus_test = [DTM_test.doc2bow(text) for text in text_data_testing['cleaned_text_tokens']]
+
+k_values = [5, 10, 25, 40, 50, 60, 80, 100]
+coherence_results = [] 
+
+for k in k_values:
+    print(k)
+    ldamodel_final = LdaMulticore(
+        corpus_test, id2word=DTM_test, num_topics=k, alpha=0.1, eta=0.01,
+        iterations=500, eval_every=25, passes=5,
+        chunksize=5000,
+        random_state=2460, workers=4 
+    )
+    
+    coherence_model_lda = models.CoherenceModel(
+        model=ldamodel_final, 
+        corpus=corpus_test,
+        texts= text_data_lda['cleaned_text_tokens'],
+        dictionary=DTM_test, 
+        coherence='c_v',
+    processes=4) 
+    coherence_scores = coherence_model_lda.get_coherence_per_topic()
+    
+    #filter out the infinite values and get mean coherence score
+    coher_scores_filtered = [score for score in coherence_scores if np.isfinite(score)]
+    coherence_score = np.mean(coher_scores_filtered)
+    
+    #store the k value and the coherence score
+    coherence_results.append({'k': k, 'coherence': coherence_score})
+
+coherence_results_df = pd.DataFrame(coherence_results)
+
+# Plot
+plt.figure(figsize=(8, 5))
+sns.scatterplot(data=coherence_results_df, x='k', y='coherence', label="Coherence (cv)")
+sns.lineplot(data=coherence_results_df, x='k', y='coherence')
+
+# Labels
+plt.xlabel("Number of Topics (k)")
+plt.ylabel("Coherence (cv)")
+plt.title("Coherence vs. Number of Topics")
+
+plt.show()
+
+###################
+# Final LDA Model #
+###################
+#Use the k value with the highest coherence score
+
+#generate the dictionary now using the full sample
 DTM = Dictionary(text_data_lda['cleaned_text_tokens'].tolist())
-DTM.filter_extremes(no_below=20, no_above=0.2)
+DTM.filter_extremes(no_below=30, no_above=0.3)
 
 #for a manual check. Turn into a data frame
 #use this to get rid of some more stopwords
@@ -180,62 +252,31 @@ DTM_df = DTM_df.sort_values(by="token").reset_index(drop=True)
 
 corpus = [DTM.doc2bow(text) for text in text_data_lda['cleaned_text_tokens']]
 
-
-
-####################################################################################
-
-from gensim.models import LdaMulticore
-from gensim.models import CoherenceModel
-
-k_values = [10, 20, 50, 100]
-coherence_results = [] 
-
-np.random.seed(2460)
-
-#################
-# Looking for the optimal number of topics
-# Check both coherence of topics and the perplexity for each K value
-
-for k in k_values:
-
-    ldamodel_final = LdaMulticore(
-        corpus, id2word=DTM, num_topics=5, alpha=0.1, eta=0.01,
-        iterations=500, eval_every=25, passes=5,
-        chunksize=5000,
-        random_state=2460, workers=4 
-    )
-    
-    coherence_model_lda = models.CoherenceModel(
-        model=ldamodel_final, 
-        corpus=corpus,
-        texts= text_data_lda['cleaned_text_tokens'],
-        dictionary=DTM, 
-        coherence='c_v') 
-    coherence_scores = coherence_model_lda.get_coherence_per_topic()
-    
-    #filter out the infinite values
-    coher_scores_filtered = [score for score in coherence_scores if np.isfinite(score)]
-    coherence_score = np.mean(coher_scores_filtered)
-    
-    #store the k value and the coherence score
-    coherence_results.append({'k': k, 'coherence': coherence_score})
-
-
-coherence_results_df = pd.DataFrame(coherence_results)
+#load a previously generated model instead of running it again
+#ldamodel_final = LdaModel.load("lda_model_2.gensim")
 
 #Run the final model
+#Using 1000 and 2500 iterations gave consistent results and took similar amount of time to run
 ldamodel_final = LdaMulticore(
-    corpus, id2word=DTM, num_topics=5, alpha=0.1, eta=0.01,
-    iterations=500, eval_every=25, passes=5,
+    corpus, id2word=DTM, num_topics=50, alpha=0.1, eta=0.01,
+    iterations=2500, eval_every=25, passes=5,
     chunksize=5000,
     random_state=2460, workers=4 
 )
 #print the topics
 print(ldamodel_final.print_topics(num_topics=5, num_words=8))
 
+#save the model and a file with the top words per topic for future reference
+ldamodel_final.save("lda_model.gensim")
+topics = {
+    f"topic_{i}": [word for word, _ in ldamodel_final.show_topic(i, topn=20)]
+    for i in range(ldamodel_final.num_topics)
+}
+topics_df = pd.DataFrame.from_dict(topics, orient="index", columns=[f"word_{i+1}" for i in range(20)])
+topics_df.to_csv('Topics_words.csv', index=False)
+
 #visualize the model using pyLDAvis
 #Code obtained directly from: https://neptune.ai/blog/pyldavis-topic-modelling-exploration-tool-that-every-nlp-data-scientist-should-know
-
 import pyLDAvis
 import pyLDAvis.gensim
 
@@ -243,9 +284,6 @@ pyLDAvis.enable_notebook()
 p = pyLDAvis.gensim.prepare(ldamodel_final, corpus, DTM)
 pyLDAvis.display(p)
 pyLDAvis.save_html(p, 'lda_visualization.html')
-
-
-
 
 #Now, create a distribution of the topics for each utterance
 #this is to get the data into the proper format
@@ -255,7 +293,9 @@ topic_dist = [
     [theta for _, theta in ldamodel_final.get_document_topics(doc, minimum_probability=0)]
     for doc in corpus]
 
-#for merging later on: add an id and convert into long form
+#for merging: add an id and convert into long form
+#NOTE: I manually checked that the topic probabilities line up with the content of the speeches
+#e.g. the utterances with the highest topic probabiliy for the "seniors" topic were all talking about pension, etc.
 topic_dist = pd.DataFrame(topic_dist)
 topic_dist['id'] = range(1, len(topic_dist) + 1)
 text_data_lda['id'] = range(1, len(text_data_lda) + 1)
@@ -264,7 +304,6 @@ text_data_lda = pd.merge(text_data_lda, topic_dist, how='left', on='id')
 
 text_data_lda = text_data_lda.rename(columns={col: f"topic_{col}" for col in text_data_lda.columns if str(col).isdigit()})
 
-
-text_data_lda.drop(columns=['SENT_Hostile2', 'cleaned_text_tokens', 'id',
-                            'hostile_word_count', 'text_clean', 'cleaned_text_3', 'utterance_counter'
+text_data_lda.drop(columns=['cleaned_text_tokens', 'id','hostile_word_count', 'text_clean',
+                            'cleaned_text_3', 'cleaned_text_2'
                             ]).to_csv('Final_Data_Reg.csv', index=False)
