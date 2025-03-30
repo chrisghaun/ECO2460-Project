@@ -9,8 +9,21 @@ import numpy as np
 
 os.chdir(r"C:\Users\jcabr\OneDrive - University of Toronto\Coursework\Winter\ECO2460\Empirical Project\Data")
 
-# import the raw data
+'''
+#merging webscrape files
+webscrape1 = pd.read_csv("webscrape_data\session_40-1.csv") # November 2008 - March 2011
+webscrape4 = pd.read_csv("webscrape_data\session_41-1.csv") # June 2011 - December 2024
 
+merged_data = pd.concat([webscrape1, webscrape4], ignore_index=True)
+merged_data["date"] = pd.to_datetime(merged_data["day"].astype(str) + " " +
+                            merged_data["month"] + " " + 
+                            merged_data["year"].astype(str), format="%d %B %Y")
+merged_data = merged_data.sort_values(by="date")
+merged_data.to_csv('web_scrape_full.csv', index=False)
+'''
+
+
+# import the raw data
 data_raw = pd.read_csv("web_scrape_full.csv")
 
 #generate a date variable
