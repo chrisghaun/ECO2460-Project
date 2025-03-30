@@ -141,25 +141,6 @@ text_data['original_length'] = text_data['text_clean'].apply(lambda text: len(te
 text_data['hostile_word_count'] = text_data['cleaned_text_3'].apply(lambda text: sum(1 for word in text.split() if word in hostile_lexicon))
 text_data["SENT_Hostile"] = text_data['hostile_word_count']/text_data['original_length']
 
-################################
-# Generate Descriptive Figures #
-################################
-
-############
-# Aggregate Hostility by day: Take the average over all blocks
-# Get a monthly average
-text_data["SENT_hostile_day"] = text_data.groupby(['date', 'party'])['SENT_Hostile'].transform('mean')
-
-avg_hostile_series = text_data[['date', 'party', 'SENT_hostile_day']].drop_duplicates()
-avg_hostile_series = avg_hostile_series[(avg_hostile_series['party'].notna())]
-avg_hostile_series = avg_hostile_series.pivot(index='date', columns='party', values='SENT_hostile_day').reset_index()
-
-avg_hostile_series['date'] = pd.to_datetime(avg_hostile_series['date'])
-monthly_avg = avg_hostile_series.resample('M', on='date').mean().reset_index()
-
-avg_hostile_series.to_csv('Hostility_Series.csv', index=False)
-monthly_avg.to_csv('Hostility_Series_M.csv', index=False)
-
 ########
 # Filter for the LDA model
 #take out 
